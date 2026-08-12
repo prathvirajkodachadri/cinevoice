@@ -76,8 +76,28 @@ npm run dev
 
 Open `http://localhost:5173`; Vite proxies `/api` to port 8000.
 
-Install DeepFilterNet separately when running outside Docker. If it is unavailable, the web UI clearly
-disables AI noise removal while deterministic enhancement remains usable.
+For AI cleanup outside Docker, install the standalone `deep-filter` release from DeepFilterNet 0.5.6
+and place it on `PATH`, or point CineVoice at it explicitly:
+
+```bash
+export CINEVOICE_DEEPFILTER_PATH=/absolute/path/to/deep-filter
+CINEVOICE_FRONTEND_DIR= uvicorn cinevoice_api.main:app --reload
+```
+
+The Python-package CLI is also supported. Its `deepFilter` executable needs a compatible PyTorch and
+Torchaudio pair; a CPU-only installation can be prepared with:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cpu \
+  torch==2.0.1 torchaudio==2.0.2
+pip install deepfilternet==0.5.6
+export CINEVOICE_DEEPFILTER_PATH="$(command -v deepFilter)"
+```
+
+DeepFilterNet downloads its pretrained model on first use. Restart the backend after installing or
+changing the executable. `GET /api/health` reports `ai_denoise_available: true` only after the CLI
+passes a runtime probe. If it is unavailable, the web UI disables AI noise removal while deterministic
+enhancement remains usable.
 
 Run the complete quality suite:
 
