@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "Studio Voice",
+  "description": "Balanced clarity, dynamics and delivery loudness.",
+  "target_lufs": -14.0,
+  "true_peak_ceiling_dbtp": -1.0,
+  "ai_denoise": {"mode": "auto", "compensate_delay": true, "post_filter": false},
+  "high_pass": {"enabled": true, "frequency_hz": 60.0, "order": 4},
+  "eq_bands": [
+    {"type": "bell", "frequency_hz": 360.0, "gain_db": -2.0, "q": 0.9, "reason": "Low-mid boxiness correction"},
+    {"type": "bell", "frequency_hz": 3200.0, "gain_db": 1.4, "q": 0.8, "reason": "Speech clarity"}
+  ],
+  "compressor": {"enabled": true, "ratio": 2.8, "attack_ms": 25.0, "release_ms": 125.0, "knee_db": 6.0, "target_gain_reduction_db": 3.0, "makeup_gain_db": 2.5},
+  "saturation": {"enabled": true, "drive_db": 0.8, "mix": 0.09},
+  "deesser": {"enabled": true, "crossover_hz": 5600.0, "attack_ms": 2.0, "release_ms": 90.0, "target_gain_reduction_db": 1.8, "maximum_gain_reduction_db": 3.0},
+  "limiter": {"enabled": true, "lookahead_ms": 5.0, "release_ms": 120.0, "maximum_recommended_reduction_db": 3.0},
+  "formant": {"enabled": false, "reason": "Speaker identity preservation"}
+}
