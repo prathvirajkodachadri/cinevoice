@@ -1,0 +1,17 @@
+{
+  "name": "CineVoice",
+  "short_name": "CineVoice",
+  "description": "Private, transparent voice enhancement for spoken-word recordings.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#06100d",
+  "theme_color": "#07120f",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

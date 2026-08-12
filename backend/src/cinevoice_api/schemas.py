@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -17,7 +17,9 @@ class JobPublic(BaseModel):
     remove_noise: bool
     original_filename: str
     created_at: datetime
+    updated_at: datetime
     expires_at: datetime
+    source_bytes: int | None = Field(default=None, ge=0)
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
     metrics: dict[str, Any] | None = None
@@ -28,12 +30,9 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     version: str
     ai_denoise_available: bool
+    ai_denoise_required: bool
     ffmpeg_available: bool
     accepted_extensions: list[str]
     profiles: list[dict[str, str]]
     limits: dict[str, int]
     privacy: dict[str, Any]
-
-
-def iso_now() -> str:
-    return datetime.now(UTC).isoformat()

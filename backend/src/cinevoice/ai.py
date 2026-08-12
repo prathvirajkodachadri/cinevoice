@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -19,8 +22,41 @@ class AIEnhancementResult:
     warning: str | None = None
 
 
+@lru_cache(maxsize=1)
 def find_deepfilter() -> str | None:
-    return shutil.which("deep-filter") or shutil.which("deepFilter")
+    """Return a runnable DeepFilterNet CLI, including an explicitly configured path."""
+    executable_names = ("deep-filter", "deepFilter", "deep-filter.exe", "deepFilter.exe")
+    candidates: list[str] = []
+    if configured := os.getenv("CINEVOICE_DEEPFILTER_PATH"):
+        candidates.append(str(Path(configured).expanduser().resolve()))
+
+    # Console scripts installed into the active virtual environment are discoverable even
+    # when its bin directory was not prepended to the service manager's PATH.
+    python_bin = Path(sys.executable).resolve().parent
+    candidates.extend(str(python_bin / name) for name in executable_names)
+    candidates.extend(
+        executable
+        for name in executable_names
+        if (executable := shutil.which(name)) is not None
+    )
+
+    for executable in dict.fromkeys(candidates):
+        path = Path(executable)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            continue
+        try:
+            probe = subprocess.run(
+                [executable, "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return executable
+    return None
 
 
 def run_deepfilter(
@@ -38,8 +74,8 @@ def run_deepfilter(
     executable = find_deepfilter()
     if executable is None:
         message = (
-            "DeepFilterNet executable was not found. Install deep-filter or DeepFilterNet "
-            "and place it on PATH."
+            "A working DeepFilterNet executable was not found. Install deep-filter or "
+            "DeepFilterNet, place it on PATH, or set CINEVOICE_DEEPFILTER_PATH."
         )
         if mode == "required":
             raise AIEnhancementError(message)
@@ -57,22 +93,45 @@ def run_deepfilter(
             command.append("--pf")
         command.append(str(Path(input_path).resolve()))
     else:
+        # The Python DeepFilterNet CLI compensates delay by default and only exposes
+        # the inverse flag. Passing the standalone binary's compensation option here
+        # makes every Python-package installation fail with an unknown argument.
         command = [executable, "--output-dir", str(output_directory)]
-        if compensate_delay:
-            command.append("--compensate-delay")
+        if not compensate_delay:
+            command.append("--no-delay-compensation")
         if post_filter:
             command.append("--pf")
         command.append(str(Path(input_path).resolve()))
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=3600)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        temporary.cleanup()
+        message = "DeepFilterNet timed out while cleaning the recording"
+        if mode == "required":
+            raise AIEnhancementError(message) from exc
+        return AIEnhancementResult(None, executable, False, message), None
+    except OSError as exc:
+        temporary.cleanup()
+        message = "DeepFilterNet could not be started"
+        if mode == "required":
+            raise AIEnhancementError(message) from exc
+        return AIEnhancementResult(None, executable, False, message), None
+
     if completed.returncode != 0:
         temporary.cleanup()
-        message = completed.stderr.strip() or completed.stdout.strip() or "Unknown error"
+        details = completed.stderr.strip() or completed.stdout.strip() or "Unknown error"
+        # Keep untrusted decoder/model output bounded before it reaches job metadata.
+        message = f"DeepFilterNet failed: {details[:400]}"
         if mode == "required":
-            raise AIEnhancementError(f"DeepFilterNet failed: {message}")
-        return AIEnhancementResult(
-            None, executable, False, f"DeepFilterNet failed: {message}"
-        ), None
+            raise AIEnhancementError(message)
+        return AIEnhancementResult(None, executable, False, message), None
 
     candidates = sorted(output_directory.rglob("*.wav"), key=lambda item: item.stat().st_mtime)
     if not candidates:

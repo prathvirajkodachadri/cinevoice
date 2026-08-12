@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +42,18 @@ def process_file(
     *,
     report_path: str | Path | None = None,
     denoise_override: str | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> ProcessResult:
+    def report_progress(progress: int, stage: str) -> None:
+        if progress_callback is not None:
+            progress_callback(progress, stage)
+
     source_path = Path(input_path).expanduser().resolve()
     destination = Path(output_path).expanduser().resolve()
     if source_path == destination:
         raise ValueError("Output must not overwrite the source recording")
 
+    report_progress(30, "Analyzing source")
     original = read_audio(source_path)
     before = analyze(original)
     warnings: list[str] = []
@@ -66,196 +73,214 @@ def process_file(
         warnings.append(message + " AI denoising was skipped.")
         ai_mode = "off"
 
+    report_progress(36, "AI noise cleanup" if ai_mode != "off" else "Preparing signal path")
     ai_result, ai_temporary = run_deepfilter(
         source_path,
         mode=ai_mode,
         compensate_delay=bool(ai_config.get("compensate_delay", True)),
         post_filter=bool(ai_config.get("post_filter", False)),
     )
-    if ai_result.warning:
-        warnings.append(ai_result.warning)
-    if ai_result.used and ai_result.output_path is not None:
-        working = read_audio(ai_result.output_path)
-        if working.channels != original.channels:
-            if ai_temporary is not None:
-                ai_temporary.cleanup()
-            raise RuntimeError("DeepFilterNet changed the channel count unexpectedly")
-        stages.append(
-            StageResult(
-                "ai_denoise",
-                True,
-                {"engine": "DeepFilterNet", "executable": ai_result.executable},
+    try:
+        if ai_result.warning:
+            warnings.append(ai_result.warning)
+        if ai_result.used and ai_result.output_path is not None:
+            working = read_audio(ai_result.output_path)
+            if working.channels != original.channels:
+                raise RuntimeError("DeepFilterNet changed the channel count unexpectedly")
+            stages.append(
+                StageResult(
+                    "ai_denoise",
+                    True,
+                    {
+                        "engine": "DeepFilterNet",
+                        "executable": (
+                            Path(ai_result.executable).name if ai_result.executable else None
+                        ),
+                    },
+                )
             )
-        )
-    else:
-        working = AudioBuffer(original.samples.copy(), original.sample_rate, original.source)
-        stages.append(StageResult("ai_denoise", False))
-
-    samples = working.samples
-    sample_rate = working.sample_rate
-
-    high_pass_config = config.get("high_pass", {})
-    if high_pass_config.get("enabled", False):
-        frequency = float(high_pass_config["frequency_hz"])
-        order = int(high_pass_config.get("order", 4))
-        samples = high_pass(samples, sample_rate, frequency, order)
-        stages.append(
-            StageResult(
-                "high_pass",
-                True,
-                {"frequency_hz": frequency, "order": order},
-            )
-        )
-    else:
-        stages.append(StageResult("high_pass", False))
-
-    applied_bands: list[dict[str, Any]] = []
-    for band in config.get("eq_bands", []):
-        frequency = float(band["frequency_hz"])
-        if frequency >= sample_rate / 2:
-            warnings.append(f"EQ band at {frequency:g} Hz was skipped because it exceeds Nyquist.")
-            continue
-        gain_db = float(band["gain_db"])
-        q = float(band["q"])
-        samples = bell(samples, sample_rate, frequency, gain_db, q)
-        applied_bands.append(
-            {
-                "frequency_hz": frequency,
-                "gain_db": gain_db,
-                "q": q,
-                "reason": band.get("reason", ""),
-            }
-        )
-    stages.append(StageResult("equalizer", bool(applied_bands), {"bands": applied_bands}))
-
-    compressor_config = config.get("compressor", {})
-    if compressor_config.get("enabled", False):
-        samples, details = compress(
-            samples,
-            sample_rate,
-            ratio=float(compressor_config["ratio"]),
-            attack_ms=float(compressor_config["attack_ms"]),
-            release_ms=float(compressor_config["release_ms"]),
-            knee_db=float(compressor_config["knee_db"]),
-            target_reduction_db=float(compressor_config["target_gain_reduction_db"]),
-            makeup_gain_db=float(compressor_config["makeup_gain_db"]),
-        )
-        stages.append(StageResult("compressor", True, details))
-    else:
-        stages.append(StageResult("compressor", False))
-
-    saturation_config = config.get("saturation", {})
-    if saturation_config.get("enabled", False):
-        drive_db = float(saturation_config["drive_db"])
-        mix = float(saturation_config["mix"])
-        samples = warm_saturation(samples, drive_db, mix)
-        stages.append(StageResult("saturation", True, {"drive_db": drive_db, "mix": mix}))
-    else:
-        stages.append(StageResult("saturation", False))
-
-    deesser_config = config.get("deesser", {})
-    if deesser_config.get("enabled", False):
-        crossover = float(deesser_config["crossover_hz"])
-        if crossover < sample_rate / 2:
-            low, high = low_pass_split(samples, sample_rate, crossover)
-            deesser_gain, details = deess_gain(
-                high,
-                sample_rate,
-                attack_ms=float(deesser_config["attack_ms"]),
-                release_ms=float(deesser_config["release_ms"]),
-                target_reduction_db=float(deesser_config["target_gain_reduction_db"]),
-                maximum_reduction_db=float(deesser_config["maximum_gain_reduction_db"]),
-            )
-            samples = low + high * deesser_gain[:, None]
-            details["crossover_hz"] = crossover
-            stages.append(StageResult("deesser", True, details))
         else:
-            warnings.append("De-esser crossover exceeds Nyquist and was skipped.")
-            stages.append(StageResult("deesser", False))
-    else:
-        stages.append(StageResult("deesser", False))
+            working = AudioBuffer(original.samples.copy(), original.sample_rate, original.source)
+            stages.append(StageResult("ai_denoise", False))
 
-    interim = AudioBuffer(samples, sample_rate)
-    interim_metrics = analyze(interim)
-    target_lufs = float(config["target_lufs"])
-    if interim_metrics.integrated_lufs is None:
-        normalization_gain_db = 0.0
-        warnings.append(
-            "Loudness normalization was skipped because integrated loudness was undefined."
-        )
-    else:
-        normalization_gain_db = target_lufs - interim_metrics.integrated_lufs
-        normalization_gain_db = float(np.clip(normalization_gain_db, -18.0, 18.0))
-        samples = _gain(samples, normalization_gain_db)
-    stages.append(
-        StageResult(
-            "loudness_normalization",
-            True,
-            {"target_lufs": target_lufs, "applied_gain_db": normalization_gain_db},
-        )
-    )
+        report_progress(48, "Balancing tone")
+        samples = working.samples
+        sample_rate = working.sample_rate
 
-    limiter_config = config.get("limiter", {})
-    ceiling = float(config["true_peak_ceiling_dbtp"])
-    if limiter_config.get("enabled", False):
-        samples, limiter_details = limit_peak(
-            samples,
-            sample_rate,
-            ceiling_dbfs=ceiling,
-            lookahead_ms=float(limiter_config["lookahead_ms"]),
-            release_ms=float(limiter_config["release_ms"]),
-        )
-        recommended = float(limiter_config["maximum_recommended_reduction_db"])
-        stage_warnings: list[str] = []
-        if limiter_details["maximum_gain_reduction_db"] > recommended:
-            message = (
-                "Limiter exceeded the recommended reduction; use event gain or additional "
-                "leveling before mastering."
+        high_pass_config = config.get("high_pass", {})
+        if high_pass_config.get("enabled", False):
+            frequency = float(high_pass_config["frequency_hz"])
+            order = int(high_pass_config.get("order", 4))
+            samples = high_pass(samples, sample_rate, frequency, order)
+            stages.append(
+                StageResult(
+                    "high_pass",
+                    True,
+                    {"frequency_hz": frequency, "order": order},
+                )
             )
-            stage_warnings.append(message)
-            warnings.append(message)
-        stages.append(StageResult("limiter", True, limiter_details, stage_warnings))
-    else:
-        stages.append(StageResult("limiter", False))
+        else:
+            stages.append(StageResult("high_pass", False))
 
-    preliminary = analyze(AudioBuffer(samples, sample_rate))
-    if preliminary.true_peak_dbtp > ceiling:
-        safety_trim_db = ceiling - preliminary.true_peak_dbtp - 0.02
-        samples = _gain(samples, safety_trim_db)
+        applied_bands: list[dict[str, Any]] = []
+        for band in config.get("eq_bands", []):
+            frequency = float(band["frequency_hz"])
+            if frequency >= sample_rate / 2:
+                warnings.append(
+                    f"EQ band at {frequency:g} Hz was skipped because it exceeds Nyquist."
+                )
+                continue
+            gain_db = float(band["gain_db"])
+            q = float(band["q"])
+            samples = bell(samples, sample_rate, frequency, gain_db, q)
+            applied_bands.append(
+                {
+                    "frequency_hz": frequency,
+                    "gain_db": gain_db,
+                    "q": q,
+                    "reason": band.get("reason", ""),
+                }
+            )
+        stages.append(StageResult("equalizer", bool(applied_bands), {"bands": applied_bands}))
+
+        report_progress(58, "Controlling dynamics")
+        compressor_config = config.get("compressor", {})
+        if compressor_config.get("enabled", False):
+            samples, details = compress(
+                samples,
+                sample_rate,
+                ratio=float(compressor_config["ratio"]),
+                attack_ms=float(compressor_config["attack_ms"]),
+                release_ms=float(compressor_config["release_ms"]),
+                knee_db=float(compressor_config["knee_db"]),
+                target_reduction_db=float(compressor_config["target_gain_reduction_db"]),
+                makeup_gain_db=float(compressor_config["makeup_gain_db"]),
+            )
+            stages.append(StageResult("compressor", True, details))
+        else:
+            stages.append(StageResult("compressor", False))
+
+        saturation_config = config.get("saturation", {})
+        if saturation_config.get("enabled", False):
+            drive_db = float(saturation_config["drive_db"])
+            mix = float(saturation_config["mix"])
+            samples = warm_saturation(samples, drive_db, mix)
+            stages.append(StageResult("saturation", True, {"drive_db": drive_db, "mix": mix}))
+        else:
+            stages.append(StageResult("saturation", False))
+
+        report_progress(68, "Smoothing sibilance")
+        deesser_config = config.get("deesser", {})
+        if deesser_config.get("enabled", False):
+            crossover = float(deesser_config["crossover_hz"])
+            if crossover < sample_rate / 2:
+                low, high = low_pass_split(samples, sample_rate, crossover)
+                deesser_gain, details = deess_gain(
+                    high,
+                    sample_rate,
+                    attack_ms=float(deesser_config["attack_ms"]),
+                    release_ms=float(deesser_config["release_ms"]),
+                    target_reduction_db=float(deesser_config["target_gain_reduction_db"]),
+                    maximum_reduction_db=float(deesser_config["maximum_gain_reduction_db"]),
+                )
+                samples = low + high * deesser_gain[:, None]
+                details["crossover_hz"] = crossover
+                stages.append(StageResult("deesser", True, details))
+            else:
+                warnings.append("De-esser crossover exceeds Nyquist and was skipped.")
+                stages.append(StageResult("deesser", False))
+        else:
+            stages.append(StageResult("deesser", False))
+
+        report_progress(78, "Matching delivery loudness")
+        interim = AudioBuffer(samples, sample_rate)
+        interim_metrics = analyze(interim)
+        target_lufs = float(config["target_lufs"])
+        if interim_metrics.integrated_lufs is None:
+            normalization_gain_db = 0.0
+            warnings.append(
+                "Loudness normalization was skipped because integrated loudness was undefined."
+            )
+        else:
+            normalization_gain_db = target_lufs - interim_metrics.integrated_lufs
+            normalization_gain_db = float(np.clip(normalization_gain_db, -18.0, 18.0))
+            samples = _gain(samples, normalization_gain_db)
         stages.append(
             StageResult(
-                "true_peak_safety_trim",
+                "loudness_normalization",
                 True,
-                {"applied_gain_db": safety_trim_db, "ceiling_dbtp": ceiling},
+                {"target_lufs": target_lufs, "applied_gain_db": normalization_gain_db},
             )
         )
 
-    final_audio = AudioBuffer(samples, sample_rate)
-    written = write_audio_atomic(destination, final_audio, subtype="PCM_24")
-    after = analyze(read_audio(written))
+        report_progress(87, "Protecting true peaks")
+        limiter_config = config.get("limiter", {})
+        ceiling = float(config["true_peak_ceiling_dbtp"])
+        if limiter_config.get("enabled", False):
+            samples, limiter_details = limit_peak(
+                samples,
+                sample_rate,
+                ceiling_dbfs=ceiling,
+                lookahead_ms=float(limiter_config["lookahead_ms"]),
+                release_ms=float(limiter_config["release_ms"]),
+            )
+            recommended = float(limiter_config["maximum_recommended_reduction_db"])
+            stage_warnings: list[str] = []
+            if limiter_details["maximum_gain_reduction_db"] > recommended:
+                message = (
+                    "Limiter exceeded the recommended reduction; use event gain or additional "
+                    "leveling before mastering."
+                )
+                stage_warnings.append(message)
+                warnings.append(message)
+            stages.append(StageResult("limiter", True, limiter_details, stage_warnings))
+        else:
+            stages.append(StageResult("limiter", False))
 
-    if after.integrated_lufs is not None and abs(after.integrated_lufs - target_lufs) > 1.0:
-        warnings.append(
-            "Final loudness is more than 1 LU from target; manual level review is required."
+        preliminary = analyze(AudioBuffer(samples, sample_rate))
+        if preliminary.true_peak_dbtp > ceiling:
+            safety_trim_db = ceiling - preliminary.true_peak_dbtp - 0.02
+            samples = _gain(samples, safety_trim_db)
+            stages.append(
+                StageResult(
+                    "true_peak_safety_trim",
+                    True,
+                    {"applied_gain_db": safety_trim_db, "ceiling_dbtp": ceiling},
+                )
+            )
+
+        report_progress(95, "Writing studio master")
+        final_audio = AudioBuffer(samples, sample_rate)
+        written = write_audio_atomic(destination, final_audio, subtype="PCM_24")
+        after = analyze(read_audio(written))
+
+        if after.integrated_lufs is not None and abs(after.integrated_lufs - target_lufs) > 1.0:
+            warnings.append(
+                "Final loudness is more than 1 LU from target; manual level review is required."
+            )
+        if after.true_peak_dbtp > ceiling + 0.1:
+            warnings.append("True-peak verification failed; do not publish this render.")
+
+        result = ProcessResult(
+            input_path=str(source_path),
+            output_path=str(written),
+            input_sha256=sha256_file(source_path),
+            output_sha256=sha256_file(written),
+            preset_name=str(config["name"]),
+            before=before,
+            after=after,
+            stages=stages,
+            warnings=warnings,
         )
-    if after.true_peak_dbtp > ceiling + 0.1:
-        warnings.append("True-peak verification failed; do not publish this render.")
 
-    result = ProcessResult(
-        input_path=str(source_path),
-        output_path=str(written),
-        input_sha256=sha256_file(source_path),
-        output_sha256=sha256_file(written),
-        preset_name=str(config["name"]),
-        before=before,
-        after=after,
-        stages=stages,
-        warnings=warnings,
-    )
+        if report_path is not None:
+            # API reports contain hashes and measurements, never private host filesystem paths.
+            _write_json_atomic(
+                Path(report_path).expanduser().resolve(),
+                result.to_dict(include_paths=False),
+            )
 
-    if report_path is not None:
-        _write_json_atomic(Path(report_path).expanduser().resolve(), result.to_dict())
-
-    if ai_temporary is not None:
-        ai_temporary.cleanup()
-    return result
+        return result
+    finally:
+        if ai_temporary is not None:
+            ai_temporary.cleanup()

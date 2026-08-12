@@ -14,7 +14,10 @@ services:
       CINEVOICE_REQUIRE_AI: "0"
     volumes:
       - cinevoice-jobs:/app/data/jobs
+    init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
