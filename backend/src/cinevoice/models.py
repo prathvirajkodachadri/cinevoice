@@ -75,10 +75,8 @@ class ProcessResult:
     stages: list[StageResult]
     warnings: list[str]
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "input_path": self.input_path,
-            "output_path": self.output_path,
+    def to_dict(self, *, include_paths: bool = True) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "input_sha256": self.input_sha256,
             "output_sha256": self.output_sha256,
             "preset_name": self.preset_name,
@@ -87,3 +85,10 @@ class ProcessResult:
             "stages": [asdict(stage) for stage in self.stages],
             "warnings": self.warnings,
         }
+        if include_paths:
+            data = {
+                "input_path": self.input_path,
+                "output_path": self.output_path,
+                **data,
+            }
+        return data

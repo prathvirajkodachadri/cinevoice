@@ -32,8 +32,12 @@ def read_audio(path: str | Path) -> AudioBuffer:
     except (RuntimeError, OSError) as exc:
         raise AudioIOError(f"Unable to read {source}: {exc}") from exc
 
+    if samples.size == 0 or samples.shape[0] == 0:
+        raise AudioIOError("Audio file contains no samples")
     if samples.shape[1] > 8:
         raise AudioIOError("More than eight channels are not supported in version 0.1")
+    if not np.isfinite(samples).all():
+        raise AudioIOError("Audio contains NaN or infinite samples")
     peak = float(np.max(np.abs(samples)))
     if peak > 1.5:
         raise AudioIOError(

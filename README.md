@@ -29,8 +29,9 @@ http://localhost:8080
 ```
 
 The x86_64 Docker image builds the React website, FastAPI backend, FFmpeg media layer, a checksum-
-verified DeepFilterNet 0.5.6 runtime, and the deterministic audio engine. Uploaded jobs are deleted
-after 24 hours by default.
+verified DeepFilterNet 0.5.6 runtime, and the deterministic audio engine. Other architectures build
+without the optional AI binary and remain fully usable for deterministic enhancement. Uploaded jobs
+are deleted after 24 hours by default.
 
 ## What version 0.1 does
 
@@ -39,10 +40,12 @@ after 24 hours by default.
 - 48 kHz preparation through native decoding or FFmpeg.
 - High-pass filtering, conservative EQ, compression, subtle saturation and de-essing.
 - Integrated-loudness targeting and true-peak limiting.
-- Original/enhanced browser playback.
-- Technical JSON report with before/after measurements and file hashes.
+- Side-by-side original/enhanced playback with automatic A/B pause behavior.
+- Upload and processing progress, clear failure recovery, and session restoration after refresh.
+- Technical JSON report with before/after measurements and file hashes (no host paths).
 - Non-destructive processing; the upload is never overwritten.
-- Automatic expiry, upload limits, safe filenames and atomic metadata writes.
+- Automatic expiry, immediate job deletion, upload/duration limits, and atomic metadata writes.
+- Capability-aware format controls when FFmpeg or the optional AI model is unavailable.
 
 ## Profiles
 
@@ -67,7 +70,7 @@ Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -76,11 +79,21 @@ Open `http://localhost:5173`; Vite proxies `/api` to port 8000.
 Install DeepFilterNet separately when running outside Docker. If it is unavailable, the web UI clearly
 disables AI noise removal while deterministic enhancement remains usable.
 
+Run the complete quality suite:
+
+```bash
+python -m pip install -e "./backend[dev]"
+ruff check backend/src backend/tests
+pytest backend
+cd frontend && npm ci && npm run build
+```
+
 ## API
 
 - `GET /api/health` — capabilities, limits and profiles.
 - `POST /api/v1/jobs` — multipart upload and enhancement options.
 - `GET /api/v1/jobs/{id}` — progress and result metadata.
+- `GET /api/v1/jobs/{id}/source` — original recording for playback or download.
 - `GET /api/v1/jobs/{id}/result` — enhanced WAV.
 - `GET /api/v1/jobs/{id}/report` — technical report.
 - `DELETE /api/v1/jobs/{id}` — immediate deletion.

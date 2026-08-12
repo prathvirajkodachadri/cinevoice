@@ -33,11 +33,15 @@ class JobStore:
 
     @staticmethod
     def validate_id(job_id: str) -> str:
+        """Return a canonical UUIDv4 or hide the malformed identifier as not found."""
         try:
-            parsed = UUID(job_id, version=4)
-        except ValueError as exc:
+            parsed = UUID(job_id)
+        except (AttributeError, ValueError) as exc:
             raise JobNotFoundError(job_id) from exc
-        return str(parsed)
+        canonical = str(parsed)
+        if parsed.version != 4 or job_id != canonical:
+            raise JobNotFoundError(job_id)
+        return canonical
 
     def directory(self, job_id: str) -> Path:
         valid = self.validate_id(job_id)
@@ -61,7 +65,9 @@ class JobStore:
                 "remove_noise": remove_noise,
                 "original_filename": self.safe_filename(filename),
                 "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
                 "expires_at": (now + self.retention).isoformat(),
+                "source_bytes": None,
                 "error": None,
                 "warnings": [],
                 "metrics": None,
@@ -90,14 +96,18 @@ class JobStore:
             if not path.is_file():
                 raise JobNotFoundError(job_id)
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
+                metadata = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise JobNotFoundError(job_id) from exc
+            if not isinstance(metadata, dict) or metadata.get("id") != job_id:
+                raise JobNotFoundError(job_id)
+            return metadata
 
     def update(self, job_id: str, **changes: Any) -> dict[str, Any]:
         with self._lock:
             metadata = self.get(job_id)
             metadata.update(changes)
+            metadata["updated_at"] = datetime.now(UTC).isoformat()
             self._write(job_id, metadata)
             return metadata
 
@@ -107,6 +117,32 @@ class JobStore:
             if not directory.is_dir():
                 raise JobNotFoundError(job_id)
             shutil.rmtree(directory)
+
+    def recover_interrupted(self) -> int:
+        """Mark work abandoned by a previous process as failed instead of polling forever."""
+        recovered = 0
+        with self._lock:
+            for directory in self.root.iterdir():
+                if not directory.is_dir():
+                    continue
+                try:
+                    metadata = self.get(directory.name)
+                except JobNotFoundError:
+                    continue
+                if metadata.get("status") not in {"queued", "processing"}:
+                    continue
+                self.update(
+                    directory.name,
+                    status="failed",
+                    progress=100,
+                    stage="Processing interrupted",
+                    error=(
+                        "Processing was interrupted when the service restarted. "
+                        "Please start the enhancement again."
+                    ),
+                )
+                recovered += 1
+        return recovered
 
     def cleanup_expired(self) -> int:
         removed = 0
@@ -118,8 +154,10 @@ class JobStore:
                 try:
                     metadata = self.get(directory.name)
                     expires = datetime.fromisoformat(metadata["expires_at"])
-                except (JobNotFoundError, KeyError, ValueError):
+                except (JobNotFoundError, KeyError, TypeError, ValueError):
                     continue
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=UTC)
                 if expires <= now:
                     shutil.rmtree(directory, ignore_errors=True)
                     removed += 1

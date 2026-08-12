@@ -64,15 +64,35 @@ def run_deepfilter(
             command.append("--pf")
         command.append(str(Path(input_path).resolve()))
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=3600)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        temporary.cleanup()
+        message = "DeepFilterNet timed out while cleaning the recording"
+        if mode == "required":
+            raise AIEnhancementError(message) from exc
+        return AIEnhancementResult(None, executable, False, message), None
+    except OSError as exc:
+        temporary.cleanup()
+        message = "DeepFilterNet could not be started"
+        if mode == "required":
+            raise AIEnhancementError(message) from exc
+        return AIEnhancementResult(None, executable, False, message), None
+
     if completed.returncode != 0:
         temporary.cleanup()
-        message = completed.stderr.strip() or completed.stdout.strip() or "Unknown error"
+        details = completed.stderr.strip() or completed.stdout.strip() or "Unknown error"
+        # Keep untrusted decoder/model output bounded before it reaches job metadata.
+        message = f"DeepFilterNet failed: {details[:400]}"
         if mode == "required":
-            raise AIEnhancementError(f"DeepFilterNet failed: {message}")
-        return AIEnhancementResult(
-            None, executable, False, f"DeepFilterNet failed: {message}"
-        ), None
+            raise AIEnhancementError(message)
+        return AIEnhancementResult(None, executable, False, message), None
 
     candidates = sorted(output_directory.rglob("*.wav"), key=lambda item: item.stat().st_mtime)
     if not candidates:
